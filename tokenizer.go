@@ -1,4 +1,4 @@
-package main
+package corn
 
 import (
 	"fmt"
@@ -26,6 +26,7 @@ const (
 	tokenPathSegment
 	tokenFloat
 	tokenInteger
+	tokenCharEscape
 	tokenCharSequence
 	tokenInput
 )
@@ -33,7 +34,9 @@ const (
 const (
 	charsWhitespace          = " \t\r\n"
 	charsInvalidPath         = charsWhitespace + "=."
-	charsInteger             = "0123456789"
+	charsHexInteger          = "0123456789abcdefABCDEF"
+	charsInteger             = "-0123456789_"
+	charsFloat               = charsInteger + "+e"
 	charsInputFirst          = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 	charsInput               = charsInputFirst + "1234567890_"
 	charsInvalidCharSequence = "\"\\$"
@@ -82,6 +85,8 @@ func (t Token[Stringer]) String() string {
 		identifier = "}"
 	case tokenBracketOpen:
 		identifier = "["
+	case tokenBracketClose:
+		identifier = "]"
 	case tokenEquals:
 		identifier = "="
 	case tokenDoubleQuote:
@@ -110,6 +115,8 @@ func (t Token[Stringer]) String() string {
 		identifier = "input"
 	case tokenCharSequence:
 		identifier = "char_seq"
+	case tokenCharEscape:
+		identifier = "char_escape"
 
 	default:
 		identifier = "?"
@@ -117,7 +124,6 @@ func (t Token[Stringer]) String() string {
 
 	if t.Data != nil {
 		return fmt.Sprintf("Token(%s(%v))", identifier, *t.Data)
-
 	} else {
 		return fmt.Sprintf("Token(%s)", identifier)
 	}
@@ -134,16 +140,16 @@ func dataToken[T comparable](id tokenId, data T) Token[T] {
 func takeWhile(input []rune, check func(rune) bool) ([]rune, []rune) {
 	var slice []rune
 
+	if len(input) == 0 {
+		return slice, input
+	}
+
 	var char = input[0]
 	for check(char) && len(input) > 1 {
-		var char2, input2 = input[0], input[1:]
-		char = char2
+		slice = append(slice, char)
 
-		// TODO: Two checks - bad :(
-		if check(char) {
-			input = input2
-			slice = append(slice, char)
-		}
+		input = input[1:]
+		char = input[0]
 	}
 
 	return slice, input
@@ -199,7 +205,7 @@ func matchDynamicToken(tokenId tokenId, matcher dynamicTokenMatcher) matcher {
 		input, data = matcher(input)
 
 		if data != nil {
-			var token = dataToken[any](tokenId, data)
+			var token = dataToken(tokenId, data)
 			tokens = append(tokens, token)
 			return input, tokens, true
 		}
@@ -220,8 +226,7 @@ func matchInput(input []rune) ([]rune, any) {
 
 		input = input[2:]
 
-		var rest []rune
-		rest, input = takeWhile(input, func(char rune) bool {
+		rest, input := takeWhile(input, func(char rune) bool {
 			return strings.ContainsRune(charsInput, char)
 		})
 
@@ -232,9 +237,39 @@ func matchInput(input []rune) ([]rune, any) {
 	return input, nil
 }
 
+func matchQuotedPathSegment(input []rune) ([]rune, any) {
+	if len(input) < 3 || input[0] != '\'' {
+		return input, nil
+	}
+
+	escaping := false
+	path, input := takeWhile(input[1:], func(r rune) bool {
+		if r == '\\' {
+			escaping = true
+		}
+
+		if r == '\'' && escaping {
+			escaping = false
+			return true
+		} else {
+			return r != '\''
+		}
+	})
+
+	if input[0] != '\'' {
+		return input, nil
+	}
+
+	input = input[1:]
+
+	// TODO: this is a hack to handle escaped quotes including their backslash
+	// would be better to just exclude them in the first place
+	pathS := strings.ReplaceAll(string(path), "\\'", "'")
+	return input, pathS
+}
+
 func matchPathSegment(input []rune) ([]rune, any) {
-	var path []rune
-	path, input = takeWhile(input, func(r rune) bool {
+	path, input := takeWhile(input, func(r rune) bool {
 		return !strings.ContainsRune(charsInvalidPath, r)
 	})
 
@@ -246,8 +281,7 @@ func matchPathSegment(input []rune) ([]rune, any) {
 }
 
 func matchFloat(input []rune) ([]rune, any) {
-	var numS []rune
-	numS, _ = takeWhile(input, func(char rune) bool {
+	numS, _ := takeWhile(input, func(char rune) bool {
 		return strings.ContainsRune(charsInteger, char)
 	})
 
@@ -257,9 +291,8 @@ func matchFloat(input []rune) ([]rune, any) {
 
 	input = input[len(numS)+1:]
 
-	var decimals []rune
-	decimals, input = takeWhile(input, func(char rune) bool {
-		return strings.ContainsRune(charsInteger, char)
+	decimals, input := takeWhile(input, func(char rune) bool {
+		return strings.ContainsRune(charsFloat, char)
 	})
 
 	numS = append(numS, '.')
@@ -273,13 +306,20 @@ func matchFloat(input []rune) ([]rune, any) {
 	return input, num
 }
 
-func matchInteger(input []rune) ([]rune, any) {
-	var numS []rune
-	numS, input = takeWhile(input, func(char rune) bool {
-		return strings.ContainsRune(charsInteger, char)
+func matchHexInteger(input []rune) ([]rune, any) {
+	if len(input) < 3 {
+		return input, nil
+	}
+
+	if input[0] != '0' || input[1] != 'x' {
+		return input, nil
+	}
+
+	numS, input := takeWhile(input[2:], func(char rune) bool {
+		return strings.ContainsRune(charsHexInteger, char)
 	})
 
-	var num, err = strconv.Atoi(string(numS))
+	var num, err = strconv.ParseInt(string(numS), 16, 64)
 	if err != nil {
 		return input, nil
 	}
@@ -287,18 +327,71 @@ func matchInteger(input []rune) ([]rune, any) {
 	return input, num
 }
 
+func matchInteger(input []rune) ([]rune, any) {
+	numS, input := takeWhile(input, func(char rune) bool {
+		return strings.ContainsRune(charsInteger, char)
+	})
+
+	// TODO: This is not spec compliant - needs to only allow one consecutive _
+	numString := strings.ReplaceAll(string(numS), "_", "")
+
+	var num, err = strconv.ParseInt(string(numString), 10, 64)
+	if err != nil {
+		return input, nil
+	}
+
+	return input, num
+}
+
+func matchCharEscape(input []rune) ([]rune, any) {
+	if len(input) < 2 || input[0] != '\\' {
+		return input, nil
+	}
+
+	const LEN_UNICODE = 2 + 4
+	if len(input) >= LEN_UNICODE && input[1] == 'u' {
+		var codeS = input[2:6]
+		var code, err = strconv.ParseInt(string(codeS), 16, 32)
+
+		if err != nil {
+			return input, nil
+		}
+
+		input = input[6:]
+
+		return input, rune(code)
+	}
+
+	var char rune
+	switch input[1] {
+	case '\\':
+		char = '\\'
+	case '"':
+		char = '"'
+	case 'n':
+		char = '\n'
+	case 'r':
+		char = '\r'
+	case 't':
+		char = '\t'
+	case '$':
+		char = '$'
+
+	default:
+		return input, nil
+	}
+
+	input = input[2:]
+
+	return input, char
+}
+
 func matchCharSequence(input []rune) ([]rune, any) {
-	var seq []rune
-	seq, input = takeWhile(input, func(char rune) bool {
-		// TODO: Handle escape chars
+	seq, input := takeWhile(input, func(char rune) bool {
 		return !strings.ContainsRune(charsInvalidCharSequence, char)
 	})
 
-	if len(seq) > 0 {
-		return input, string(seq)
-	}
-
-	return input, nil
+	return input, string(seq)
 }
 
 // TODO: Make more efficient - allocating on every token currently :(
@@ -321,11 +414,12 @@ func getMatchers(state stateId) []MatchRule {
 		return []MatchRule{
 			matchRuleStateChange(matchToken(tokenBraceClose, '}'), popState),
 
-			matchRule(matchDynamicToken(tokenPathSegment, matchPathSegment)),
 			matchRuleStateChange(matchToken(tokenEquals, '='), statePusher(stateValue)),
 			matchRule(matchCompoundToken(tokenSpread, []rune(".."))),
 			matchRule(matchToken(tokenPathSeparator, '.')),
 			matchRule(matchDynamicToken(tokenInput, matchInput)),
+			matchRule(matchDynamicToken(tokenPathSegment, matchQuotedPathSegment)),
+			matchRule(matchDynamicToken(tokenPathSegment, matchPathSegment)),
 		}
 	case stateArray:
 		return []MatchRule{
@@ -359,6 +453,7 @@ func getMatchers(state stateId) []MatchRule {
 
 			matchRuleStateChange(matchDynamicToken(tokenInput, matchInput), popState),
 			matchRuleStateChange(matchDynamicToken(tokenFloat, matchFloat), popState),
+			matchRuleStateChange(matchDynamicToken(tokenInteger, matchHexInteger), popState),
 			matchRuleStateChange(matchDynamicToken(tokenInteger, matchInteger), popState),
 
 			matchRuleStateChange(matchToken(tokenBracketClose, ']'), popState),
@@ -368,6 +463,7 @@ func getMatchers(state stateId) []MatchRule {
 			matchRuleStateChange(matchToken(tokenDoubleQuote, '"'), popState),
 
 			matchRule(matchDynamicToken(tokenInput, matchInput)),
+			matchRule(matchDynamicToken(tokenCharEscape, matchCharEscape)),
 			matchRule(matchDynamicToken(tokenCharSequence, matchCharSequence)),
 		}
 	default:
@@ -392,24 +488,29 @@ func popState(state []stateId) []stateId {
 }
 
 func tokenize(inputString string) []Token[any] {
-	var input = []rune(inputString)
+	var input = []rune(strings.TrimSpace(inputString))
 	var tokens []Token[any]
 	var state = []stateId{stateTopLevel}
 
 	for len(input) > 0 {
 		var length = len(input)
-
-		//fmt.Println(string(input))
-		//fmt.Println(tokens)
-		//fmt.Println("---")
-
-		if strings.ContainsRune(charsWhitespace, input[0]) {
-			_, input = takeWhile(input, func(r rune) bool {
-				return strings.ContainsRune(charsWhitespace, r)
-			})
-		}
-
 		var currentState = state[len(state)-1]
+
+		if currentState != stateString {
+			// handle whitespace
+			if strings.ContainsRune(charsWhitespace, input[0]) {
+				_, input = takeWhile(input, func(r rune) bool {
+					return strings.ContainsRune(charsWhitespace, r)
+				})
+			}
+
+			// handle comments
+			if len(input) > 1 && input[0] == '/' && input[1] == '/' {
+				_, input = takeWhile(input, func(r rune) bool {
+					return r != '\n'
+				})
+			}
+		}
 
 		var matchers = getMatchers(currentState)
 
@@ -425,10 +526,6 @@ func tokenize(inputString string) []Token[any] {
 				break
 			}
 		}
-
-		//fmt.Println(string(input))
-		//fmt.Println(tokens)
-		//fmt.Println("=====")
 
 		if len(input) == length {
 			panic("length unchanged")
