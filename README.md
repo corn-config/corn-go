@@ -1,6 +1,6 @@
 # Corn Go
 
-Go implementation of [libcorn](https://github.com/corn-config/corn-go).
+Go implementation of [libcorn](https://github.com/corn-config/corn).
 
 This is a full-spec implementation, which passes the reference test suite, so should work as expected.
 That said, it has not currently been road-tested, and the code is rough around the edges, so I would not regard it production-ready.
